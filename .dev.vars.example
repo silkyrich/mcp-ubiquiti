@@ -10,6 +10,9 @@ UNIFI_HOST_ID="your-console-host-id"
 # The single Google account allowed to use this connector
 ALLOWED_EMAIL="you@gmail.com"
 
-# Google OAuth 2.0 client (console.cloud.google.com → Credentials → OAuth client ID, type "Web application")
-GOOGLE_CLIENT_ID="your-google-client-id.apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET="your-google-client-secret"
+# Cloudflare Access OIDC app (Zero Trust → Access → Applications → SaaS → OIDC).
+# Access performs the login against whichever IdPs you've configured there
+# (Google, Entra, one-time PIN), so there is no third-party console to set up.
+ACCESS_TEAM_DOMAIN="your-team.cloudflareaccess.com"
+ACCESS_CLIENT_ID="your-access-client-id"
+ACCESS_CLIENT_SECRET="your-access-client-secret"

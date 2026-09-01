@@ -10,6 +10,7 @@
 
 import { UnifiClient, UnifiConfig, UnifiError } from "./unifi";
 import { TOOLS, TOOLS_BY_NAME } from "./tools";
+import { log, logError } from "./log";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = { name: "mcp-ubiquiti", version: "0.1.0" };
@@ -57,18 +58,29 @@ async function dispatch(req: JsonRpcRequest, cfg: UnifiConfig): Promise<object |
     case "tools/call": {
       const name = req.params?.name;
       const tool = TOOLS_BY_NAME.get(name);
-      if (!tool) return error(req.id, -32602, `Unknown tool: ${name}`);
+      if (!tool) {
+        logError("mcp.tool.unknown", { tool: name });
+        return error(req.id, -32602, `Unknown tool: ${name}`);
+      }
       const client = new UnifiClient(cfg);
+      const started = Date.now();
       try {
         const data = await tool.handler(client, req.params?.arguments ?? {});
+        log("mcp.tool.ok", { tool: name, ms: Date.now() - started });
         return result(req.id, {
           content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         });
       } catch (e) {
-        const msg =
-          e instanceof UnifiError
-            ? `UniFi request failed (${e.status}): ${e.message}`
-            : `Tool error: ${(e as Error).message}`;
+        const isUnifi = e instanceof UnifiError;
+        logError("mcp.tool.failed", {
+          tool: name,
+          ms: Date.now() - started,
+          status: isUnifi ? (e as UnifiError).status : undefined,
+          reason: (e as Error).message,
+        });
+        const msg = isUnifi
+          ? `UniFi request failed (${(e as UnifiError).status}): ${(e as Error).message}`
+          : `Tool error: ${(e as Error).message}`;
         return result(req.id, {
           content: [{ type: "text", text: msg }],
           isError: true,

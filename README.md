@@ -10,7 +10,7 @@ to your console over the link it already maintains. Works behind CGNAT.
 
 ```
 Claude  ──OAuth──▶  Cloudflare Worker  ──X-API-KEY──▶  api.ui.com  ──▶  your UniFi console
-        (your Google login)          (this repo)      (Ubiquiti cloud)
+     (via Cloudflare Access)         (this repo)      (Ubiquiti cloud)
 ```
 
 ## What Claude can see
@@ -27,9 +27,10 @@ Read-only in this first release — it observes, it does not reconfigure:
 
 ## Security model
 
-- **Access is bound to one Google account.** OAuth login is required, and the
-  Worker rejects any authenticated email that isn't on the allowlist
-  (`ALLOWED_EMAIL`). Nobody else can complete the flow, even with the URL.
+- **Access is bound to one identity.** Login is delegated to Cloudflare Access,
+  whose policies perform the real identity check. The Worker then rejects any
+  authenticated email that isn't `ALLOWED_EMAIL`, so nobody else can complete
+  the flow even with the URL.
 - **All secrets live as encrypted Cloudflare secrets**, never in the repo. The
   `.gitignore` also blocks `.dev.vars` and any `*.rtf` key-scratch files.
 - **The UniFi key never reaches Claude** — it stays server-side in the Worker.
@@ -38,7 +39,8 @@ Read-only in this first release — it observes, it does not reconfigure:
 
 - A UniFi console (firmware ≥ 5.0.3) adopted into Site Manager.
 - A [Cloudflare](https://dash.cloudflare.com) account (free tier is fine).
-- A Google account (used as the login identity).
+- Cloudflare Zero Trust (Access) enabled on that account, with at least one
+  identity provider configured.
 
 ## Setup
 
@@ -62,14 +64,21 @@ Find your console's host id (you'll set it as a secret in step 5):
 curl -s -H "X-API-KEY: <your-key>" https://api.ui.com/v1/hosts | jq '.data[].id'
 ```
 
-### 3. Create a Google OAuth client
+### 3. Create a Cloudflare Access OIDC app
 
-[console.cloud.google.com](https://console.cloud.google.com) → **APIs &
-Services → Credentials → Create OAuth client ID → Web application**. Add the
-authorized redirect URI for your Worker (printed during `wrangler deploy`, of
-the form `https://mcp-ubiquiti.<subdomain>.workers.dev/callback`). Note the
-client ID and secret. The Google address permitted to use the connector is
-set as the `ALLOWED_EMAIL` secret in step 5.
+Login is delegated to **Cloudflare Access**, so it uses whichever identity
+providers you've already configured there (Google, Entra, one-time PIN) — there
+is no third-party developer console to set up.
+
+In [Cloudflare Zero Trust](https://one.dash.cloudflare.com) → **Access →
+Applications → Add an application → SaaS**, choose **OIDC** and set the
+redirect URL to your Worker's callback (printed during `wrangler deploy`, of
+the form `https://mcp-ubiquiti.<subdomain>.workers.dev/callback`).
+
+Note the **client ID**, **client secret**, and your **team domain**
+(`your-team.cloudflareaccess.com`). Add an Access policy restricting the app to
+the identity you want. `ALLOWED_EMAIL` (step 5) is then a second, local check
+so the connector stays bound to one person even if the policy is later widened.
 
 ### 4. Create the KV namespace
 
@@ -84,9 +93,10 @@ Paste the returned id into `wrangler.jsonc` under `kv_namespaces[0].id`.
 ```bash
 npx wrangler secret put UNIFI_API_KEY        # the Site Manager API key
 npx wrangler secret put UNIFI_HOST_ID        # console id from step 2
-npx wrangler secret put ALLOWED_EMAIL        # the one Google account allowed in
-npx wrangler secret put GOOGLE_CLIENT_ID
-npx wrangler secret put GOOGLE_CLIENT_SECRET
+npx wrangler secret put ALLOWED_EMAIL        # the one identity allowed in
+npx wrangler secret put ACCESS_TEAM_DOMAIN   # your-team.cloudflareaccess.com
+npx wrangler secret put ACCESS_CLIENT_ID
+npx wrangler secret put ACCESS_CLIENT_SECRET
 ```
 
 ### 6. Deploy
@@ -99,7 +109,7 @@ npm run deploy
 
 In Claude → **Settings → Connectors → Add custom connector**, paste your
 Worker URL (`https://mcp-ubiquiti.<subdomain>.workers.dev/mcp`). Claude will
-walk you through the Google login; only `ALLOWED_EMAIL` succeeds.
+walk you through the Cloudflare Access login; only `ALLOWED_EMAIL` succeeds.
 
 ## Local development
 
