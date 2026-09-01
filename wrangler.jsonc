@@ -1,0 +1,27 @@
+{
+  // Cloudflare Worker config. See https://developers.cloudflare.com/workers/wrangler/configuration/
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-ubiquiti",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Non-secret configuration. Personal values (ALLOWED_EMAIL, UNIFI_HOST_ID)
+  // are set as secrets so they stay out of this public file — see README.
+  "vars": {
+    "UNIFI_SITE": "default"
+  },
+
+  // Token store required by @cloudflare/workers-oauth-provider.
+  // Create with: wrangler kv namespace create OAUTH_KV  → paste the id below.
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

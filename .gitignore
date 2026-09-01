@@ -1,0 +1,28 @@
+# ── SECRETS: never commit ──────────────────────────────────────────────
+# The API-key scratch files (contain live UniFi keys)
+*.rtf
+api.txt*
+cloud-api.txt*
+# Local Wrangler secrets / env
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+*.local
+# ...but DO ship the safe template
+!.dev.vars.example
+
+# ── Cloudflare / Wrangler ──────────────────────────────────────────────
+.wrangler/
+wrangler.toml.bak
+
+# ── Node ───────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-error.log*
+dist/
+.DS_Store
+
+# ── Editor ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/

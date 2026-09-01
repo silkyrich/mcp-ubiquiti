@@ -1,0 +1,15 @@
+# Copy to `.dev.vars` for local `wrangler dev`. NEVER commit the real file.
+# In production these are set with `wrangler secret put <NAME>`.
+
+# UniFi Site Manager API key (create at unifi.ui.com → Settings → API Keys)
+UNIFI_API_KEY="your-unifi-cloud-api-key"
+
+# UniFi console host id (curl -H "X-API-KEY: <key>" https://api.ui.com/v1/hosts)
+UNIFI_HOST_ID="your-console-host-id"
+
+# The single Google account allowed to use this connector
+ALLOWED_EMAIL="you@gmail.com"
+
+# Google OAuth 2.0 client (console.cloud.google.com → Credentials → OAuth client ID, type "Web application")
+GOOGLE_CLIENT_ID="your-google-client-id.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET="your-google-client-secret"
