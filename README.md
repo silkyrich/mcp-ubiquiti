@@ -20,7 +20,7 @@ Read-only in this first release — it observes, it does not reconfigure:
 | Tool | What it returns |
 |------|-----------------|
 | `network_overview` | Device/client counts, ISP, WAN uptime, tx-retry |
-| `list_clients` | Connected clients: IP, MAC, VLAN, SSID, live throughput |
+| `list_clients` | Connected clients: IP, MAC, VLAN, SSID, live throughput, plus (wifi) which AP they're on, signal in dBm, SNR, band and channel |
 | `list_devices` | Gateways/switches/APs: online state, model, firmware, client count |
 | `list_wifi` | Configured SSIDs, security mode, VLAN mapping (no passphrases) |
 | `list_networks` | Networks/VLANs and their VLAN IDs |

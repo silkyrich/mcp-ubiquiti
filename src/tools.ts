@@ -18,6 +18,9 @@ export interface Tool {
 
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
 
+/** UniFi's radio codes, as bands people recognise. */
+const BAND: Record<string, string> = { ng: "2.4GHz", na: "5GHz", "6e": "6GHz" };
+
 /** Bytes → human string. */
 function human(bytes: number): string {
   if (!bytes) return "0 B";
@@ -67,31 +70,56 @@ export const TOOLS: Tool[] = [
   {
     name: "list_clients",
     description:
-      "List clients currently connected, with IP, MAC, VLAN, SSID (or wired), and live throughput. Optionally filter by a search string matched against name/hostname/IP/MAC.",
+      "List clients currently connected, with IP, MAC, VLAN, SSID (or wired), live throughput, and — for wifi clients — which access point they're on and how strongly it hears them (signal in dBm). Because the AP is named after its location, this gives a rough idea of where a device is. Optionally filter by a search string matched against name/hostname/IP/MAC.",
     inputSchema: {
       type: "object",
       properties: {
         search: { type: "string", description: "Case-insensitive filter over name/hostname/ip/mac." },
         limit: { type: "number", description: "Max clients to return (default 50)." },
+        wifi_only: { type: "boolean", description: "Return only wireless clients." },
       },
       additionalProperties: false,
     },
     handler: async (client, args) => {
       const search = (args.search ?? "").toLowerCase();
       const limit = Number.isFinite(args.limit) ? Math.max(1, args.limit) : 50;
-      const clients = await client.clients();
+      const [clients, devices] = await Promise.all([client.clients(), client.devices()]);
+
+      // APs are named for where they are ("U7 Pro - Kitchen"), so resolving
+      // ap_mac to that name is what turns a signal reading into a location.
+      const apName = new Map<string, string>(
+        devices.filter((d) => d.mac).map((d) => [String(d.mac).toLowerCase(), d.name || d.model]),
+      );
+
       const shaped = clients
-        .map((c) => ({
-          name: c.name || c.hostname || "(unknown)",
-          ip: c.ip,
-          mac: c.mac,
-          vlan: c.vlan ?? null,
-          connection: c.is_wired ? "wired" : (c.essid ?? "wifi"),
-          rx: c.rx_bytes ?? 0,
-          tx: c.tx_bytes ?? 0,
-          total_h: human((c.rx_bytes ?? 0) + (c.tx_bytes ?? 0)),
-          uptime_s: c.uptime,
-        }))
+        .filter((c) => !args.wifi_only || !c.is_wired)
+        .map((c) => {
+          const base = {
+            name: c.name || c.hostname || "(unknown)",
+            ip: c.ip,
+            mac: c.mac,
+            vlan: c.vlan ?? null,
+            connection: c.is_wired ? "wired" : (c.essid ?? "wifi"),
+            rx: c.rx_bytes ?? 0,
+            tx: c.tx_bytes ?? 0,
+            total_h: human((c.rx_bytes ?? 0) + (c.tx_bytes ?? 0)),
+            uptime_s: c.uptime,
+          };
+          // Wired clients have no radio; wifi clients occasionally report none
+          // either (mesh/just-roamed), so every RF field stays optional.
+          if (c.is_wired || c.signal == null) return base;
+          return {
+            ...base,
+            ap: apName.get(String(c.ap_mac).toLowerCase()) ?? c.ap_mac ?? null,
+            ap_mac: c.ap_mac ?? null,
+            signal_dbm: c.signal,           // negative; closer to 0 is stronger
+            noise_dbm: c.noise ?? null,
+            snr_db: c.noise != null ? c.signal - c.noise : null,
+            band: BAND[c.radio] ?? c.radio ?? null,
+            channel: c.channel ?? null,
+            satisfaction: c.satisfaction ?? null,
+          };
+        })
         .filter((c) =>
           !search ||
           [c.name, c.ip, c.mac].some((f) => String(f).toLowerCase().includes(search)),
