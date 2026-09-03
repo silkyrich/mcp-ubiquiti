@@ -21,6 +21,25 @@ const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: fal
 /** UniFi's radio codes, as bands people recognise. */
 const BAND: Record<string, string> = { ng: "2.4GHz", na: "5GHz", "6e": "6GHz" };
 
+/**
+ * The PHY the client actually negotiated, as a Wi-Fi generation.
+ *
+ * This is the honest answer to "is this thing modern?" — better than guessing
+ * from the MAC vendor, because it is what the AP and client agreed over the
+ * air. Note it is independent of the band: a Wi-Fi 6 client parked on a
+ * 2.4GHz-only SSID still reports `ax`. The converse does not hold — 802.11ac
+ * does not exist on 2.4GHz, so a Wi-Fi 5 client there reports `ng`.
+ */
+const PHY: Record<string, string> = {
+  b: "802.11b (legacy)",
+  g: "802.11g (legacy)",
+  ng: "Wi-Fi 4 (802.11n)",
+  na: "Wi-Fi 4 (802.11n)",
+  ac: "Wi-Fi 5 (802.11ac)",
+  ax: "Wi-Fi 6 (802.11ax)",
+  be: "Wi-Fi 7 (802.11be)",
+};
+
 /** Bytes → human string. */
 function human(bytes: number): string {
   if (!bytes) return "0 B";
@@ -70,7 +89,7 @@ export const TOOLS: Tool[] = [
   {
     name: "list_clients",
     description:
-      "List clients currently connected, with IP, MAC, VLAN, SSID (or wired), live throughput, and — for wifi clients — which access point they're on and how strongly it hears them (signal in dBm). Because the AP is named after its location, this gives a rough idea of where a device is. Optionally filter by a search string matched against name/hostname/IP/MAC.",
+      "List clients currently connected, with IP, MAC, VLAN, SSID (or wired), live throughput, and — for wifi clients — which access point they're on, how strongly it hears them (signal in dBm), and the PHY they negotiated (Wi-Fi generation, channel width, spatial streams, link rate). Because the AP is named after its location, the signal gives a rough idea of where a device is; the PHY shows whether a device is a modern radio or a legacy one. Optionally filter by a search string matched against name/hostname/IP/MAC.",
     inputSchema: {
       type: "object",
       properties: {
@@ -118,6 +137,12 @@ export const TOOLS: Tool[] = [
             band: BAND[c.radio] ?? c.radio ?? null,
             channel: c.channel ?? null,
             satisfaction: c.satisfaction ?? null,
+            // What the client negotiated, not what it is capable of.
+            phy: PHY[c.radio_proto] ?? c.radio_proto ?? null,
+            channel_width_mhz: c.channel_width ?? null,
+            spatial_streams: c.nss ?? null,
+            tx_rate_mbps: c.tx_rate != null ? Math.round(c.tx_rate / 1000) : null,
+            rx_rate_mbps: c.rx_rate != null ? Math.round(c.rx_rate / 1000) : null,
           };
         })
         .filter((c) =>
@@ -183,6 +208,42 @@ export const TOOLS: Tool[] = [
         enabled: n.enabled,
         subnet: n.ip_subnet,
       }));
+    },
+  },
+
+  {
+    name: "rename_client",
+    description:
+      "Set the display name of a known client, identified by MAC address. This is the only tool that writes to UniFi: it changes a label in the client list and never touches network configuration. Returns the previous name so the change can be reversed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mac: {
+          type: "string",
+          description: "MAC address of the client to rename, e.g. aa:bb:cc:dd:ee:ff.",
+        },
+        name: { type: "string", description: "New display name." },
+      },
+      required: ["mac", "name"],
+      additionalProperties: false,
+    },
+    handler: async (client, args) => {
+      const mac = String(args.mac ?? "").trim().toLowerCase();
+      const name = String(args.name ?? "").trim();
+      if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) {
+        throw new Error(`Not a MAC address: ${args.mac}`);
+      }
+      if (!name || name.length > 128) throw new Error("Name must be 1-128 characters.");
+
+      // Look the client up by MAC rather than making the caller supply an
+      // internal id, and capture the old name so the edit is reversible.
+      const known = await client.knownClients();
+      const target = known.find((u) => String(u.mac).toLowerCase() === mac);
+      if (!target) throw new Error(`No client known with MAC ${mac}.`);
+
+      const previous = target.name ?? target.hostname ?? null;
+      await client.renameClient(target._id, name);
+      return { mac, previous_name: previous, new_name: name, renamed: true };
     },
   },
 ];

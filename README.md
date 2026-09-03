@@ -15,15 +15,17 @@ Claude  ──OAuth──▶  Cloudflare Worker  ──X-API-KEY──▶  api.u
 
 ## What Claude can see
 
-Read-only in this first release — it observes, it does not reconfigure:
+Observation only, with one narrow exception (`rename_client`). Nothing here
+changes network configuration:
 
 | Tool | What it returns |
 |------|-----------------|
 | `network_overview` | Device/client counts, ISP, WAN uptime, tx-retry |
-| `list_clients` | Connected clients: IP, MAC, VLAN, SSID, live throughput, plus (wifi) which AP they're on, signal in dBm, SNR, band and channel |
+| `list_clients` | Connected clients: IP, MAC, VLAN, SSID, live throughput, plus (wifi) which AP they're on, signal in dBm, SNR, band, channel, and the negotiated PHY (Wi-Fi generation, channel width, spatial streams, link rate) |
 | `list_devices` | Gateways/switches/APs: online state, model, firmware, client count |
 | `list_wifi` | Configured SSIDs, security mode, VLAN mapping (no passphrases) |
 | `list_networks` | Networks/VLANs and their VLAN IDs |
+| `rename_client` | **(write)** Sets a client's display name, by MAC. Returns the previous name so the change can be reversed. |
 
 ## Security model
 
@@ -34,6 +36,8 @@ Read-only in this first release — it observes, it does not reconfigure:
 - **All secrets live as encrypted Cloudflare secrets**, never in the repo. The
   `.gitignore` also blocks `.dev.vars` and any `*.rtf` key-scratch files.
 - **The UniFi key never reaches Claude** — it stays server-side in the Worker.
+- **Exactly one write exists.** `rename_client` sets a display label and
+  nothing else; there is no code path to SSID, firewall, or DHCP settings.
 
 ## Prerequisites
 

@@ -105,6 +105,36 @@ export class UnifiClient {
     return r?.data ?? [];
   }
 
+  /** All clients the console knows about, including currently-offline ones. */
+  async knownClients(): Promise<any[]> {
+    const r = await this.get(this.siteApi("/list/user"));
+    return r?.data ?? [];
+  }
+
+  /**
+   * Set a client's display name. This is the ONLY write in this connector:
+   * it changes a label in the client list, never network configuration.
+   */
+  async renameClient(id: string, name: string): Promise<any> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const res = await fetch(this.siteApi(`/upd/user/${id}`), {
+        method: "POST",
+        headers: { ...this.headers(), "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+        signal: ctrl.signal,
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        throw new UnifiError(`UniFi rename ${res.status}`, res.status, text.slice(0, 500));
+      }
+      return text ? JSON.parse(text) : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** Configured networks / VLANs. */
   async networks(): Promise<any[]> {
     const r = await this.get(this.siteApi("/rest/networkconf"));
