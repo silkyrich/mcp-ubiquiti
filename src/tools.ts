@@ -212,6 +212,181 @@ export const TOOLS: Tool[] = [
   },
 
   {
+    name: "client_history",
+    description:
+      "How much traffic a client used over time, for answering questions like 'when was the iPad streaming this morning?'. Returns a time series when one device matches, or a ranked list of the busiest devices when several do. Retention on the console limits how far back each resolution goes: 5-minute buckets last about a day, hourly about a week, daily about a month.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        search: {
+          type: "string",
+          description: "Filter to a device by name, hostname or MAC. Omit to rank all clients.",
+        },
+        hours: { type: "number", description: "How far back to look. Default 24, max 720 (30 days)." },
+        bucket: {
+          type: "string",
+          enum: ["5minutes", "hourly", "daily"],
+          description: "Resolution. Chosen automatically from the window if omitted.",
+        },
+        limit: { type: "number", description: "Max devices in the ranked list (default 15)." },
+      },
+      additionalProperties: false,
+    },
+    handler: async (client, args) => {
+      const hours = Math.min(720, Math.max(1, Number(args.hours) || 24));
+      // 5-minute data is trimmed after ~a day and hourly after ~a week, so
+      // pick the finest resolution the window can actually be served at.
+      const bucket: "5minutes" | "hourly" | "daily" =
+        args.bucket ?? (hours <= 24 ? "5minutes" : hours <= 168 ? "hourly" : "daily");
+      const endMs = Date.now();
+      const startMs = endMs - hours * 3600 * 1000;
+
+      // /list/user covers clients that have since gone offline; /stat/sta
+      // would only name the ones connected right now.
+      const known = await client.knownClients();
+      const label = (mac: string) => {
+        const u = known.find((k) => String(k.mac).toLowerCase() === mac.toLowerCase());
+        return u?.name || u?.hostname || mac;
+      };
+
+      let macs: string[] | undefined;
+      if (args.search) {
+        const q = String(args.search).toLowerCase();
+        // Dedupe: /list/user can hold more than one record per MAC, which
+        // would otherwise push a single-device query down the ranked path.
+        macs = [
+          ...new Set(
+            known
+              .filter((u) =>
+                [u.name, u.hostname, u.mac].some((f) =>
+                  String(f ?? "").toLowerCase().includes(q),
+                ),
+              )
+              .map((u) => String(u.mac).toLowerCase()),
+          ),
+        ];
+        if (!macs.length) throw new Error(`No known client matching "${args.search}".`);
+      }
+
+      const [rows, tz] = await Promise.all([
+        client.userReport(bucket, startMs, endMs, macs),
+        client.siteTimezone(),
+      ]);
+      const fmt = new Intl.DateTimeFormat("en-GB", {
+        timeZone: tz, day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+      });
+      // Counters are from the infrastructure's point of view, so tx is
+      // AP->client, i.e. the client's download. Verified against wireless
+      // clients; treat the direction on WIRED clients with suspicion, as the
+      // switch-port perspective is not confirmed to match.
+      const mb = (b: number) => Math.round(((b ?? 0) / 1048576) * 10) / 10;
+      const window = { hours, bucket, timezone: tz, from: fmt.format(startMs), to: fmt.format(endMs) };
+
+      if (macs?.length === 1) {
+        const series = rows
+          .map((r: any) => ({
+            when: fmt.format(new Date(r.time)),
+            down_mb: mb(r.tx_bytes),
+            up_mb: mb(r.rx_bytes),
+          }))
+          .filter((r) => r.down_mb + r.up_mb >= 1);
+        const down = rows.reduce((n: number, r: any) => n + (r.tx_bytes ?? 0), 0);
+        const up = rows.reduce((n: number, r: any) => n + (r.rx_bytes ?? 0), 0);
+        return {
+          client: label(macs[0]),
+          mac: macs[0],
+          window,
+          total_down: human(down),
+          total_up: human(up),
+          note: "Buckets under 1 MB are omitted.",
+          series,
+        };
+      }
+
+      const totals = new Map<string, { down: number; up: number }>();
+      for (const r of rows as any[]) {
+        const k = String(r.user ?? r.oid ?? "").toLowerCase();
+        if (!k) continue;
+        const t = totals.get(k) ?? { down: 0, up: 0 };
+        t.down += r.tx_bytes ?? 0;
+        t.up += r.rx_bytes ?? 0;
+        totals.set(k, t);
+      }
+      const limit = Math.max(1, Number(args.limit) || 15);
+      const ranked = [...totals.entries()]
+        .sort((a, b) => b[1].down + b[1].up - (a[1].down + a[1].up))
+        .slice(0, limit)
+        .map(([mac, t]) => ({
+          client: label(mac), mac,
+          down: human(t.down), up: human(t.up), total_bytes: t.down + t.up,
+        }));
+      return { window, clients: ranked.length, top: ranked };
+    },
+  },
+
+  {
+    name: "client_sessions",
+    description:
+      "When clients joined and left the network, for answering 'when did the iPad connect?' or 'is this device dropping out?'. Each row is one association, with the AP it was on, how long it lasted, and how many times it roamed between APs during that session. Roams are reported separately so they are not mistaken for disconnects.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        search: { type: "string", description: "Filter to a device by name, hostname or MAC." },
+        hours: { type: "number", description: "How far back to look. Default 24." },
+        limit: { type: "number", description: "Max sessions to return (default 50)." },
+      },
+      additionalProperties: false,
+    },
+    handler: async (client, args) => {
+      const hours = Math.min(720, Math.max(1, Number(args.hours) || 24));
+      const endSec = Math.floor(Date.now() / 1000);
+      const startSec = endSec - hours * 3600;
+
+      const [sessions, devices, tz] = await Promise.all([
+        client.sessions(startSec, endSec),
+        client.devices(),
+        client.siteTimezone(),
+      ]);
+      const apName = new Map<string, string>(
+        devices.filter((d) => d.mac).map((d) => [String(d.mac).toLowerCase(), d.name || d.model]),
+      );
+      const fmt = new Intl.DateTimeFormat("en-GB", {
+        timeZone: tz, day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+      });
+      const dur = (s: number) => {
+        if (s == null) return null;
+        const h = Math.floor(s / 3600);
+        const m = Math.round((s % 3600) / 60);
+        return h ? `${h}h ${m}m` : `${m}m`;
+      };
+
+      const q = args.search ? String(args.search).toLowerCase() : null;
+      const shaped = (sessions as any[])
+        .filter((s) =>
+          !q || [s.name, s.hostname, s.mac].some((f) => String(f ?? "").toLowerCase().includes(q)),
+        )
+        .sort((a, b) => (b.assoc_time ?? 0) - (a.assoc_time ?? 0))
+        .slice(0, Math.max(1, Number(args.limit) || 50))
+        .map((s) => ({
+          client: s.name || s.hostname || s.mac,
+          mac: s.mac,
+          connected: s.assoc_time ? fmt.format(s.assoc_time * 1000) : null,
+          // There is no disconnect field; it is assoc_time + duration.
+          disconnected:
+            s.assoc_time && s.duration ? fmt.format((s.assoc_time + s.duration) * 1000) : null,
+          duration: dur(s.duration),
+          ap: s.is_wired ? "wired" : apName.get(String(s.ap_mac).toLowerCase()) ?? s.ap_mac ?? null,
+          roams: Array.isArray(s.roaming_sessions) ? s.roaming_sessions.length : 0,
+          guest: !!s.is_guest,
+          down: human(s.tx_bytes ?? 0),
+          up: human(s.rx_bytes ?? 0),
+          satisfaction: s.satisfaction_avg ?? s.satisfaction ?? null,
+        }));
+      return { window: { hours, timezone: tz }, count: shaped.length, sessions: shaped };
+    },
+  },
+
+  {
     name: "rename_client",
     description:
       "Set the display name of a known client, identified by MAC address. This is the only tool that writes to UniFi: it changes a label in the client list and never touches network configuration. Returns the previous name so the change can be reversed.",

@@ -33,6 +33,7 @@ export class UnifiError extends Error {
 
 export class UnifiClient {
   private readonly site: string;
+  private tz?: string;
 
   constructor(private readonly cfg: UnifiConfig) {
     this.site = cfg.site ?? "default";
@@ -103,6 +104,79 @@ export class UnifiClient {
   async wlans(): Promise<any[]> {
     const r = await this.get(this.siteApi("/rest/wlanconf"));
     return r?.data ?? [];
+  }
+
+  /** POST a JSON body to the Network app. The legacy stats API needs this. */
+  private async postJson(url: string, body: unknown): Promise<any> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...this.headers(), "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        throw new UnifiError(`UniFi API ${res.status} for ${url}`, res.status, text.slice(0, 500));
+      }
+      return text ? JSON.parse(text) : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Per-client byte counters bucketed over time.
+   *
+   * Retention is roughly: 5minutes ~1 day, hourly ~1 week, daily ~30 days.
+   * NOTE the units trap — these take MILLISECONDS, while /stat/session takes
+   * SECONDS. Passing ms to session returns 200 with zero rows, silently.
+   */
+  async userReport(
+    interval: "5minutes" | "hourly" | "daily",
+    startMs: number,
+    endMs: number,
+    macs?: string[],
+  ): Promise<any[]> {
+    const body: Record<string, unknown> = {
+      attrs: ["rx_bytes", "tx_bytes", "time"],
+      start: startMs,
+      end: endMs,
+    };
+    if (macs?.length) body.macs = macs.map((m) => m.toLowerCase());
+    const r = await this.postJson(this.siteApi(`/stat/report/${interval}.user`), body);
+    return r?.data ?? [];
+  }
+
+  /**
+   * Association sessions: when each client joined, how long it stayed, and
+   * how much it moved between APs.
+   *
+   * NOTE the units trap: this takes SECONDS, while /stat/report takes
+   * MILLISECONDS. Passing ms here returns 200 with zero rows, silently —
+   * a valid-looking empty answer rather than an error.
+   */
+  async sessions(startSec: number, endSec: number): Promise<any[]> {
+    const r = await this.postJson(this.siteApi("/stat/session"), {
+      type: "all",
+      start: startSec,
+      end: endSec,
+    });
+    return r?.data ?? [];
+  }
+
+  /** The console's timezone, so history can be reported in local time. */
+  async siteTimezone(): Promise<string> {
+    if (this.tz) return this.tz;
+    try {
+      const sites = await this.sites();
+      this.tz = sites[0]?.meta?.timezone || "UTC";
+    } catch {
+      this.tz = "UTC";
+    }
+    return this.tz!;
   }
 
   /** All clients the console knows about, including currently-offline ones. */

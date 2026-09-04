@@ -25,6 +25,8 @@ changes network configuration:
 | `list_devices` | Gateways/switches/APs: online state, model, firmware, client count |
 | `list_wifi` | Configured SSIDs, security mode, VLAN mapping (no passphrases) |
 | `list_networks` | Networks/VLANs and their VLAN IDs |
+| `client_history` | Traffic over time for a client, or a ranked list of the busiest. 5-min buckets ~1 day, hourly ~1 week, daily ~30 days |
+| `client_sessions` | Association history: when clients joined and left, which AP, duration, and roam count |
 | `rename_client` | **(write)** Sets a client's display name, by MAC. Returns the previous name so the change can be reversed. |
 
 ## Security model
@@ -124,8 +126,10 @@ npm run dev
 
 ## Roadmap
 
-- Event/log retrieval (client connect/disconnect, admin changes).
-- Historical stats (per-client/day, WAN latency trends).
+- Admin change events (`stat/event` is not relayed by the cloud proxy; it
+  404s on both GET and POST, so connect/disconnect is served from
+  `client_sessions` instead).
+- WAN latency trends over time.
 - Opt-in write tools (SSID, firewall) behind an explicit confirmation flag.
 
 ## License
