@@ -275,23 +275,34 @@ export const TOOLS: Tool[] = [
       const fmt = new Intl.DateTimeFormat("en-GB", {
         timeZone: tz, day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
       });
-      // Counters are from the infrastructure's point of view, so tx is
-      // AP->client, i.e. the client's download. Verified against wireless
-      // clients; treat the direction on WIRED clients with suspicion, as the
-      // switch-port perspective is not confirmed to match.
+      // Direction is NOT uniform across link types, which is easy to miss.
+      // For wireless clients the counters are AP-relative, so tx is the
+      // client's download. For WIRED clients they arrive swapped: an Xbox
+      // showed 8.4 GB of "upload" in one hour and an LG TV 11.3 GB, neither
+      // of which is a thing those devices do — both are plainly downloads.
+      // So normalise on is_wired and report true down/up throughout.
+      const wired = new Set(
+        known.filter((u) => u.is_wired).map((u) => String(u.mac).toLowerCase()),
+      );
+      const dirOf = (macRaw: string, r: any) => {
+        const w = wired.has(String(macRaw).toLowerCase());
+        return { down: (w ? r.rx_bytes : r.tx_bytes) ?? 0, up: (w ? r.tx_bytes : r.rx_bytes) ?? 0 };
+      };
       const mb = (b: number) => Math.round(((b ?? 0) / 1048576) * 10) / 10;
       const window = { hours, bucket, timezone: tz, from: fmt.format(startMs), to: fmt.format(endMs) };
 
       if (macs?.length === 1) {
         const series = rows
-          .map((r: any) => ({
-            when: fmt.format(new Date(r.time)),
-            down_mb: mb(r.tx_bytes),
-            up_mb: mb(r.rx_bytes),
-          }))
+          .map((r: any) => {
+            const d = dirOf(macs![0], r);
+            return { when: fmt.format(new Date(r.time)), down_mb: mb(d.down), up_mb: mb(d.up) };
+          })
           .filter((r) => r.down_mb + r.up_mb >= 1);
-        const down = rows.reduce((n: number, r: any) => n + (r.tx_bytes ?? 0), 0);
-        const up = rows.reduce((n: number, r: any) => n + (r.rx_bytes ?? 0), 0);
+        let down = 0, up = 0;
+        for (const r of rows as any[]) {
+          const d = dirOf(macs![0], r);
+          down += d.down; up += d.up;
+        }
         return {
           client: label(macs[0]),
           mac: macs[0],
@@ -308,8 +319,8 @@ export const TOOLS: Tool[] = [
         const k = String(r.user ?? r.oid ?? "").toLowerCase();
         if (!k) continue;
         const t = totals.get(k) ?? { down: 0, up: 0 };
-        t.down += r.tx_bytes ?? 0;
-        t.up += r.rx_bytes ?? 0;
+        const d = dirOf(k, r);
+        t.down += d.down; t.up += d.up;
         totals.set(k, t);
       }
       const limit = Math.max(1, Number(args.limit) || 15);
