@@ -15,8 +15,9 @@ Claude  ──OAuth──▶  Cloudflare Worker  ──X-API-KEY──▶  api.u
 
 ## What Claude can see
 
-Observation only, with one narrow exception (`rename_client`). Nothing here
-changes network configuration:
+Mostly observation. The writes are deliberately narrow: `rename_client` sets a
+display label, and the traffic-rule tools manage scheduled block rules (for
+example, keeping a child's console offline during school hours):
 
 | Tool | What it returns |
 |------|-----------------|
@@ -28,6 +29,9 @@ changes network configuration:
 | `client_history` | Traffic over time for a client, or a ranked list of the busiest. 5-min buckets ~1 day, hourly ~1 week, daily ~30 days |
 | `client_sessions` | Association history: when clients joined and left, which AP, duration, and roam count |
 | `rename_client` | **(write)** Sets a client's display name, by MAC. Returns the previous name so the change can be reversed. |
+| `list_traffic_rules` | Traffic rules: what each blocks, who it applies to (by client and network name), when it runs, and whether it's on |
+| `set_traffic_rule` | **(write)** Creates or edits a rule that blocks the whole internet, DPI app categories (e.g. `games`) or domains, for chosen clients and/or networks, always or in a weekly window. Edits change only the fields passed (e.g. just `enabled: false` to pause for the holidays) and return the previous version |
+| `delete_traffic_rule` | **(write)** Deletes a rule and returns it in full so it can be recreated |
 
 ## Security model
 
@@ -38,8 +42,11 @@ changes network configuration:
 - **All secrets live as encrypted Cloudflare secrets**, never in the repo. The
   `.gitignore` also blocks `.dev.vars` and any `*.rtf` key-scratch files.
 - **The UniFi key never reaches Claude** — it stays server-side in the Worker.
-- **Exactly one write exists.** `rename_client` sets a display label and
-  nothing else; there is no code path to SSID, firewall, or DHCP settings.
+- **Writes are narrow.** `rename_client` sets a display label; the traffic-rule
+  tools manage block rules and nothing else. There is no code path to SSID,
+  VLAN, firewall-zone or DHCP settings. Write tools carry MCP annotations
+  (`readOnlyHint: false`, and `destructiveHint` on delete) so clients can ask
+  before running them.
 
 ## Prerequisites
 
@@ -130,7 +137,7 @@ npm run dev
   404s on both GET and POST, so connect/disconnect is served from
   `client_sessions` instead).
 - WAN latency trends over time.
-- Opt-in write tools (SSID, firewall) behind an explicit confirmation flag.
+- Further write tools (SSID, firewall zones) behind an explicit confirmation flag.
 
 ## License
 

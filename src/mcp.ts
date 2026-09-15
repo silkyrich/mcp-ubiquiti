@@ -52,6 +52,7 @@ async function dispatch(req: JsonRpcRequest, cfg: UnifiConfig): Promise<object |
           name: t.name,
           description: t.description,
           inputSchema: t.inputSchema,
+          ...(t.annotations ? { annotations: t.annotations } : {}),
         })),
       });
 

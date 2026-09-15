@@ -1,10 +1,11 @@
 /**
  * MCP tool definitions for the UniFi connector.
  *
- * All tools are READ-ONLY in this first cut — they observe the network
- * (who's on it, device health, performance, ISP) but never mutate config.
- * Write tools (SSID/firewall/etc.) are intentionally deferred until the
- * read surface is trusted in production.
+ * Most tools are read-only: they observe the network (who's on it, device
+ * health, performance, ISP). The writes are deliberately narrow —
+ * `rename_client` changes a label, and the traffic-rule tools manage
+ * scheduled block rules (a child's console offline during school hours, say).
+ * Nothing here touches SSIDs, VLANs, firewall zones or DHCP.
  */
 
 import { UnifiClient } from "./unifi";
@@ -13,7 +14,114 @@ export interface Tool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** MCP tool annotations, so clients can tell writes apart and ask first. */
+  annotations?: Record<string, boolean>;
   handler: (client: UnifiClient, args: Record<string, any>) => Promise<unknown>;
+}
+
+const WRITE = { readOnlyHint: false, destructiveHint: false };
+
+/**
+ * UniFi DPI application categories, by the ids the gateway uses. `games` (8)
+ * is confirmed from live traffic (Steam/console downloads land there); the
+ * rest follow Ubiquiti's DPI category table.
+ */
+const DPI_CATEGORY: Record<string, number> = {
+  instant_messaging: 0,
+  p2p: 1,
+  file_transfer: 3,
+  streaming: 4,
+  mail: 5,
+  voip: 6,
+  games: 8,
+  remote_access: 10,
+  proxy_vpn: 11,
+  web: 13,
+  social: 24,
+};
+const CATEGORY_NAME = new Map(Object.entries(DPI_CATEGORY).map(([k, v]) => [v, k]));
+
+const MATCH: Record<string, string> = {
+  internet: "INTERNET",
+  app_category: "APP_CATEGORY",
+  domain: "DOMAIN",
+};
+const MATCH_NAME = new Map(Object.entries(MATCH).map(([k, v]) => [v, k]));
+
+const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/;
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function categoryId(c: unknown): number {
+  if (typeof c === "number" && Number.isInteger(c)) return c;
+  const id = DPI_CATEGORY[String(c).toLowerCase()];
+  if (id === undefined) {
+    throw new Error(
+      `Unknown category "${c}". Known: ${Object.keys(DPI_CATEGORY).join(", ")}, or a numeric DPI category id.`,
+    );
+  }
+  return id;
+}
+
+/** "always", or a weekly window in the console's local time. */
+function parseSchedule(s: any): Record<string, unknown> {
+  if (s === "always") return { mode: "ALWAYS" };
+  const days = (Array.isArray(s?.days) ? s.days : []).map((d: unknown) =>
+    String(d).toLowerCase().slice(0, 3),
+  );
+  if (!days.length || days.some((d: string) => !DAYS.includes(d))) {
+    throw new Error('schedule.days must list days, e.g. ["mon","tue","wed","thu","fri"].');
+  }
+  if (!HHMM_RE.test(s.start ?? "") || !HHMM_RE.test(s.end ?? "")) {
+    throw new Error("schedule.start and schedule.end must be 24-hour HH:MM.");
+  }
+  return {
+    mode: "EVERY_WEEK",
+    repeat_on_days: days,
+    time_all_day: false,
+    time_range_start: s.start,
+    time_range_end: s.end,
+  };
+}
+
+/** Name lookups so rules read as "Archie - Nintendo Switch 2", not a MAC. */
+async function ruleContext(client: UnifiClient) {
+  const [known, networks] = await Promise.all([client.knownClients(), client.networks()]);
+  return {
+    known,
+    networks,
+    clientName: new Map<string, string>(
+      known.map((u) => [String(u.mac).toLowerCase(), u.name || u.hostname || u.mac]),
+    ),
+    netName: new Map<string, string>(networks.map((n) => [n._id, n.name])),
+  };
+}
+
+function describeRule(r: any, ctx: Awaited<ReturnType<typeof ruleContext>>) {
+  const s = r.schedule ?? {};
+  return {
+    id: r._id,
+    description: r.description,
+    enabled: r.enabled,
+    action: r.action,
+    match: MATCH_NAME.get(r.matching_target) ?? r.matching_target,
+    categories: r.app_category_ids?.length
+      ? r.app_category_ids.map((c: number) => CATEGORY_NAME.get(c) ?? c)
+      : undefined,
+    app_ids: r.app_ids?.length ? r.app_ids : undefined,
+    domains: r.domains?.length ? r.domains.map((d: any) => d.domain ?? d) : undefined,
+    targets: (r.target_devices ?? []).map((t: any) =>
+      t.type === "CLIENT"
+        ? { client: ctx.clientName.get(String(t.client_mac).toLowerCase()) ?? t.client_mac, mac: t.client_mac }
+        : t.type === "NETWORK"
+          ? { network: ctx.netName.get(t.network_id) ?? t.network_id }
+          : { type: t.type },
+    ),
+    schedule:
+      !s.mode || s.mode === "ALWAYS"
+        ? "always"
+        : { mode: s.mode, days: s.repeat_on_days, start: s.time_range_start, end: s.time_range_end, all_day: !!s.time_all_day },
+  };
 }
 
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
@@ -400,7 +508,7 @@ export const TOOLS: Tool[] = [
   {
     name: "rename_client",
     description:
-      "Set the display name of a known client, identified by MAC address. This is the only tool that writes to UniFi: it changes a label in the client list and never touches network configuration. Returns the previous name so the change can be reversed.",
+      "Set the display name of a known client, identified by MAC address. It changes a label in the client list and never touches network configuration. Returns the previous name so the change can be reversed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -413,6 +521,7 @@ export const TOOLS: Tool[] = [
       required: ["mac", "name"],
       additionalProperties: false,
     },
+    annotations: { ...WRITE, idempotentHint: true },
     handler: async (client, args) => {
       const mac = String(args.mac ?? "").trim().toLowerCase();
       const name = String(args.name ?? "").trim();
@@ -430,6 +539,173 @@ export const TOOLS: Tool[] = [
       const previous = target.name ?? target.hostname ?? null;
       await client.renameClient(target._id, name);
       return { mac, previous_name: previous, new_name: name, renamed: true };
+    },
+  },
+
+  {
+    name: "list_traffic_rules",
+    description:
+      "List the gateway's traffic rules: what each blocks (the whole internet, DPI app categories such as games, or domains), which clients or networks it applies to, when it runs, and whether it is enabled. Use the ids with set_traffic_rule and delete_traffic_rule.",
+    inputSchema: EMPTY_SCHEMA,
+    annotations: { readOnlyHint: true },
+    handler: async (client) => {
+      const [rules, ctx] = await Promise.all([client.trafficRules(), ruleContext(client)]);
+      return { count: rules.length, rules: rules.map((r) => describeRule(r, ctx)) };
+    },
+  },
+
+  {
+    name: "set_traffic_rule",
+    description:
+      "Create a traffic rule, or edit one by id. A rule blocks (or allows) the whole internet, DPI app categories (e.g. games) or specific domains, for chosen clients (by MAC) and/or networks (by name), either always or in a weekly window in the console's local time. When editing, only the fields you pass change — e.g. pass just `id` and `enabled: false` to pause a rule for the holidays. Passing client_macs or networks replaces the whole target list. Returns the previous version on edit so the change can be reversed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Rule id to edit. Omit to create a new rule." },
+        description: { type: "string", description: "Human-readable name. Required for a new rule." },
+        enabled: { type: "boolean", description: "Turn the rule on or off. New rules default to on." },
+        action: { type: "string", enum: ["BLOCK", "ALLOW"], description: "Default BLOCK." },
+        match: {
+          type: "string",
+          enum: Object.keys(MATCH),
+          description: "What the rule matches: all internet traffic, app categories, or domains. Required for a new rule.",
+        },
+        categories: {
+          type: "array",
+          items: { anyOf: [{ type: "string", enum: Object.keys(DPI_CATEGORY) }, { type: "number" }] },
+          description: "DPI categories for match=app_category, by name or numeric id.",
+        },
+        domains: {
+          type: "array",
+          items: { type: "string" },
+          description: "Domains for match=domain, e.g. [\"fortnite.com\", \"epicgames.com\"].",
+        },
+        client_macs: {
+          type: "array",
+          items: { type: "string" },
+          description: "Clients the rule applies to, by MAC. Must be clients the console knows.",
+        },
+        networks: {
+          type: "array",
+          items: { type: "string" },
+          description: "Networks the rule applies to, by name (e.g. \"Kids\").",
+        },
+        schedule: {
+          anyOf: [
+            { type: "string", enum: ["always"] },
+            {
+              type: "object",
+              properties: {
+                days: { type: "array", items: { type: "string", enum: DAYS } },
+                start: { type: "string", description: "HH:MM, 24-hour, console local time." },
+                end: { type: "string", description: "HH:MM, 24-hour, console local time." },
+              },
+              required: ["days", "start", "end"],
+              additionalProperties: false,
+            },
+          ],
+          description: "\"always\", or a weekly window. New rules default to always.",
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: WRITE,
+    handler: async (client, args) => {
+      const [rules, ctx] = await Promise.all([
+        args.id ? client.trafficRules() : Promise.resolve([] as any[]),
+        ruleContext(client),
+      ]);
+      const existing = args.id ? rules.find((r) => r._id === args.id) : undefined;
+      if (args.id && !existing) throw new Error(`No traffic rule with id ${args.id}.`);
+
+      // PUT replaces the whole rule, so start from the current one: a partial
+      // edit (say, just `enabled`) must leave everything else as it was.
+      const rule: Record<string, any> = existing
+        ? structuredClone(existing)
+        : {
+            action: "BLOCK",
+            enabled: true,
+            app_category_ids: [],
+            app_ids: [],
+            domains: [],
+            ip_addresses: [],
+            ip_ranges: [],
+            regions: [],
+            network_ids: [],
+            bandwidth_limit: { enabled: false, download_limit_kbps: 1024, upload_limit_kbps: 1024 },
+            schedule: { mode: "ALWAYS" },
+            target_devices: [],
+          };
+
+      if (args.description !== undefined) rule.description = String(args.description).trim();
+      if (args.enabled !== undefined) rule.enabled = !!args.enabled;
+      if (args.action !== undefined) rule.action = args.action;
+      if (args.match !== undefined) rule.matching_target = MATCH[args.match];
+      if (args.categories !== undefined) rule.app_category_ids = args.categories.map(categoryId);
+      if (args.domains !== undefined) {
+        // The v2 API rejects bare strings here; each domain is an object.
+        rule.domains = args.domains.map((d: unknown) => ({
+          domain: String(d).trim().toLowerCase(),
+          ports: [],
+          port_ranges: [],
+        }));
+      }
+      if (args.client_macs !== undefined || args.networks !== undefined) {
+        const targets: Record<string, string>[] = [];
+        for (const raw of args.client_macs ?? []) {
+          const mac = String(raw).trim().toLowerCase();
+          if (!MAC_RE.test(mac)) throw new Error(`Not a MAC address: ${raw}`);
+          if (!ctx.clientName.has(mac)) throw new Error(`No client known with MAC ${mac}.`);
+          targets.push({ type: "CLIENT", client_mac: mac });
+        }
+        for (const raw of args.networks ?? []) {
+          const q = String(raw).trim().toLowerCase();
+          const net = ctx.networks.find((n) => n._id === raw || String(n.name).toLowerCase() === q);
+          if (!net) throw new Error(`No network named "${raw}".`);
+          targets.push({ type: "NETWORK", network_id: net._id });
+        }
+        rule.target_devices = targets;
+      }
+      if (args.schedule !== undefined) rule.schedule = parseSchedule(args.schedule);
+
+      if (!rule.description) throw new Error("A rule needs a description.");
+      if (!rule.matching_target) throw new Error("A new rule needs `match`.");
+      if (!rule.target_devices?.length) throw new Error("A rule needs client_macs and/or networks.");
+      if (rule.matching_target === "APP_CATEGORY" && !rule.app_category_ids?.length) {
+        throw new Error("match=app_category needs at least one category.");
+      }
+      if (rule.matching_target === "DOMAIN" && !rule.domains?.length) {
+        throw new Error("match=domain needs at least one domain.");
+      }
+
+      const saved = existing
+        ? await client.updateTrafficRule(existing._id, rule)
+        : await client.createTrafficRule(rule);
+      return {
+        created: !existing,
+        rule: describeRule(saved ?? rule, ctx),
+        previous: existing ? describeRule(existing, ctx) : undefined,
+      };
+    },
+  },
+
+  {
+    name: "delete_traffic_rule",
+    description:
+      "Delete a traffic rule by id. Returns the deleted rule in full, so it can be recreated with set_traffic_rule. To pause a rule instead, use set_traffic_rule with enabled: false.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "Rule id, from list_traffic_rules." } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    handler: async (client, args) => {
+      const [rules, ctx] = await Promise.all([client.trafficRules(), ruleContext(client)]);
+      const target = rules.find((r) => r._id === args.id);
+      if (!target) throw new Error(`No traffic rule with id ${args.id}.`);
+      await client.deleteTrafficRule(target._id);
+      return { deleted: true, rule: describeRule(target, ctx) };
     },
   },
 ];

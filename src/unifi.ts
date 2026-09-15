@@ -107,14 +107,21 @@ export class UnifiClient {
   }
 
   /** POST a JSON body to the Network app. The legacy stats API needs this. */
-  private async postJson(url: string, body: unknown): Promise<any> {
+  private postJson(url: string, body: unknown): Promise<any> {
+    return this.send("POST", url, body);
+  }
+
+  /** Any method with an optional JSON body. The cloud proxy relays PUT and DELETE too. */
+  private async send(method: string, url: string, body?: unknown): Promise<any> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
     try {
       const res = await fetch(url, {
-        method: "POST",
-        headers: { ...this.headers(), "content-type": "application/json" },
-        body: JSON.stringify(body),
+        method,
+        headers: body === undefined
+          ? this.headers()
+          : { ...this.headers(), "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
         signal: ctrl.signal,
       });
       const text = await res.text();
@@ -186,32 +193,44 @@ export class UnifiClient {
   }
 
   /**
-   * Set a client's display name. This is the ONLY write in this connector:
-   * it changes a label in the client list, never network configuration.
+   * Set a client's display name. A label in the client list only, never
+   * network configuration.
    */
-  async renameClient(id: string, name: string): Promise<any> {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
-    try {
-      const res = await fetch(this.siteApi(`/upd/user/${id}`), {
-        method: "POST",
-        headers: { ...this.headers(), "content-type": "application/json" },
-        body: JSON.stringify({ name }),
-        signal: ctrl.signal,
-      });
-      const text = await res.text();
-      if (!res.ok) {
-        throw new UnifiError(`UniFi rename ${res.status}`, res.status, text.slice(0, 500));
-      }
-      return text ? JSON.parse(text) : null;
-    } finally {
-      clearTimeout(timer);
-    }
+  renameClient(id: string, name: string): Promise<any> {
+    return this.send("POST", this.siteApi(`/upd/user/${id}`), { name });
   }
 
   /** Configured networks / VLANs. */
   async networks(): Promise<any[]> {
     const r = await this.get(this.siteApi("/rest/networkconf"));
     return r?.data ?? [];
+  }
+
+  // ── Traffic rules (v2 API) ────────────────────────────────────────────
+  //
+  // Scheduled block/allow rules by app category, domain or whole-internet,
+  // targeted at clients or networks. The v2 API returns bare JSON (no
+  // {meta,data} envelope) and rejects domains given as plain strings: each
+  // must be an object, `{domain, ports, port_ranges}`.
+
+  private trafficRulesUrl(id?: string): string {
+    return this.proxyUrl(`/v2/api/site/${this.site}/trafficrules${id ? `/${id}` : ""}`);
+  }
+
+  async trafficRules(): Promise<any[]> {
+    return (await this.get(this.trafficRulesUrl())) ?? [];
+  }
+
+  createTrafficRule(rule: Record<string, unknown>): Promise<any> {
+    return this.send("POST", this.trafficRulesUrl(), rule);
+  }
+
+  /** PUT replaces the whole rule, so callers merge onto the current one first. */
+  updateTrafficRule(id: string, rule: Record<string, unknown>): Promise<any> {
+    return this.send("PUT", this.trafficRulesUrl(id), rule);
+  }
+
+  deleteTrafficRule(id: string): Promise<any> {
+    return this.send("DELETE", this.trafficRulesUrl(id));
   }
 }
