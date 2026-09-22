@@ -31,6 +31,10 @@ interface Env {
   ACCESS_TEAM_DOMAIN: string; // e.g. your-team.cloudflareaccess.com
   ACCESS_CLIENT_ID: string;
   ACCESS_CLIENT_SECRET: string;
+  // Optional: the home policy engine (archie-control) behind Access.
+  HOME_API_URL?: string;
+  HOME_ACCESS_CLIENT_ID?: string;
+  HOME_ACCESS_CLIENT_SECRET?: string;
 
   // Vars (wrangler.jsonc)
   UNIFI_SITE: string;
@@ -213,7 +217,16 @@ const apiHandler: Handler = {
       hostId: env.UNIFI_HOST_ID,
       site: env.UNIFI_SITE || "default",
     };
-    return handleMcp(request, cfg);
+    const home =
+      env.HOME_API_URL && env.HOME_ACCESS_CLIENT_ID && env.HOME_ACCESS_CLIENT_SECRET
+        ? {
+            baseUrl: env.HOME_API_URL,
+            clientId: env.HOME_ACCESS_CLIENT_ID,
+            clientSecret: env.HOME_ACCESS_CLIENT_SECRET,
+            actor: props.email,
+          }
+        : undefined;
+    return handleMcp(request, cfg, home);
   },
 };
 

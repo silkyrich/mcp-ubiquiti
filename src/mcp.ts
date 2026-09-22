@@ -9,6 +9,7 @@
  */
 
 import { UnifiClient, UnifiConfig, UnifiError } from "./unifi";
+import { HomeClient, HomeConfig, HomeError } from "./home";
 import { TOOLS, TOOLS_BY_NAME } from "./tools";
 import { log, logError } from "./log";
 
@@ -29,7 +30,7 @@ function error(id: any, code: number, message: string) {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-async function dispatch(req: JsonRpcRequest, cfg: UnifiConfig): Promise<object | null> {
+async function dispatch(req: JsonRpcRequest, cfg: UnifiConfig, home?: HomeConfig): Promise<object | null> {
   switch (req.method) {
     case "initialize":
       return result(req.id, {
@@ -66,17 +67,18 @@ async function dispatch(req: JsonRpcRequest, cfg: UnifiConfig): Promise<object |
       const client = new UnifiClient(cfg);
       const started = Date.now();
       try {
-        const data = await tool.handler(client, req.params?.arguments ?? {});
+        const data = await tool.handler(client, req.params?.arguments ?? {}, home ? new HomeClient(home) : undefined);
         log("mcp.tool.ok", { tool: name, ms: Date.now() - started });
         return result(req.id, {
           content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         });
       } catch (e) {
         const isUnifi = e instanceof UnifiError;
+        const isHome = e instanceof HomeError;
         logError("mcp.tool.failed", {
           tool: name,
           ms: Date.now() - started,
-          status: isUnifi ? (e as UnifiError).status : undefined,
+          status: isUnifi || isHome ? (e as UnifiError | HomeError).status : undefined,
           reason: (e as Error).message,
         });
         const msg = isUnifi
@@ -98,7 +100,7 @@ async function dispatch(req: JsonRpcRequest, cfg: UnifiConfig): Promise<object |
  * Handle one Streamable-HTTP POST. Accepts a single JSON-RPC request or a
  * batch array; returns application/json. Notifications yield 202 with no body.
  */
-export async function handleMcp(request: Request, cfg: UnifiConfig): Promise<Response> {
+export async function handleMcp(request: Request, cfg: UnifiConfig, home?: HomeConfig): Promise<Response> {
   if (request.method === "GET") {
     // No server-initiated SSE stream in this stateless design.
     return new Response("Method Not Allowed", { status: 405 });
@@ -116,7 +118,7 @@ export async function handleMcp(request: Request, cfg: UnifiConfig): Promise<Res
 
   const batch = Array.isArray(payload);
   const reqs: JsonRpcRequest[] = batch ? (payload as JsonRpcRequest[]) : [payload as JsonRpcRequest];
-  const responses = (await Promise.all(reqs.map((r) => dispatch(r, cfg)))).filter(
+  const responses = (await Promise.all(reqs.map((r) => dispatch(r, cfg, home)))).filter(
     (r): r is object => r !== null,
   );
 

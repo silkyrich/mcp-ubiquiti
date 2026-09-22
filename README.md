@@ -32,6 +32,15 @@ example, keeping a child's console offline during school hours):
 | `list_traffic_rules` | Traffic rules: what each blocks, who it applies to (by client and network name), when it runs, and whether it's on |
 | `set_traffic_rule` | **(write)** Creates or edits a rule that blocks the whole internet, DPI app categories (e.g. `games`) or domains, for chosen clients and/or networks, always or in a weekly window. Edits change only the fields passed (e.g. just `enabled: false` to pause for the holidays) and return the previous version |
 | `delete_traffic_rule` | **(write)** Deletes a rule and returns it in full so it can be recreated |
+| `archie_status` | A child's screen-time rules right now: blocking or not, schedule, any active pause and when it ends |
+| `archie_allow` | **(write)** Pause the rules for N minutes or until HH:MM; they come back by themselves |
+| `archie_revoke` | **(write)** End a pause early |
+| `archie_kick_off` | **(write)** Cut whatever is open right now without changing schedules |
+| `archie_usage` | Today per device: first online, time online, download, traffic kinds, timeline |
+
+The `archie_*` tools talk to a policy engine running at home
+([archie-control](https://github.com/silkyrich/archie-control)) through a Cloudflare
+Tunnel and Access service token; they appear only when the `HOME_*` secrets are set.
 
 ## Security model
 

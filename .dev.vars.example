@@ -16,3 +16,10 @@ ALLOWED_EMAIL="you@gmail.com"
 ACCESS_TEAM_DOMAIN="your-team.cloudflareaccess.com"
 ACCESS_CLIENT_ID="your-access-client-id"
 ACCESS_CLIENT_SECRET="your-access-client-secret"
+
+# Optional: home policy engine (github.com/silkyrich/archie-control) behind
+# Cloudflare Access. Create a service token in Zero Trust → Access → Service Auth
+# and allow it in the engine's Access application policy.
+HOME_API_URL="https://rules.example.com"
+HOME_ACCESS_CLIENT_ID="your-service-token-client-id"
+HOME_ACCESS_CLIENT_SECRET="your-service-token-client-secret"
