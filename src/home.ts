@@ -1,22 +1,31 @@
 /**
- * Client for the home policy engine (archie-control `server/api.py`).
+ * Link to a "home services" endpoint: a service at home that advertises its
+ * own tools (`GET /services`, MCP-shaped) and runs them (`POST /call/<tool>`).
  *
- * The engine runs on a box inside the house, bound to localhost, published
- * through a Cloudflare Tunnel with Access in front. The Worker authenticates
- * to Access with a service token, and names the person who asked in
- * `X-Home-Actor` so the engine's audit log records a human, not a token.
+ * The connector knows nothing about what those tools are. It fetches the
+ * catalogue when Claude lists tools and forwards calls; a capability added at
+ * home appears here on the next tools/list, with nothing to redeploy.
  *
- * Optional: when the three HOME_* secrets are absent the archie_* tools
- * simply report that the home link is not configured.
+ * The home service sits on localhost behind a Cloudflare Tunnel with Access
+ * in front. This client authenticates to Access with a service token and
+ * names the signed-in person in `X-Home-Actor` for the home audit log.
  */
 
 const REQUEST_TIMEOUT_MS = 20_000;
+const CATALOGUE_TTL_MS = 60_000;
 
 export interface HomeConfig {
-  baseUrl: string;        // e.g. https://rules.example.com
-  clientId: string;       // Access service token
+  baseUrl: string;      // e.g. https://rules.example.com
+  clientId: string;     // Cloudflare Access service token
   clientSecret: string;
-  actor: string;          // email of the signed-in connector user
+  actor: string;        // email of the signed-in connector user
+}
+
+export interface HomeTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  annotations?: Record<string, boolean>;
 }
 
 export class HomeError extends Error {
@@ -26,18 +35,34 @@ export class HomeError extends Error {
   }
 }
 
+// One catalogue per Worker isolate; a minute is plenty and keeps tools/list quick.
+let cached: { at: number; base: string; tools: HomeTool[] } | undefined;
+
 export class HomeClient {
   constructor(private readonly cfg: HomeConfig) {}
 
-  status() { return this.send("GET", "/api/status"); }
-  usage() { return this.send("GET", "/api/usage"); }
-  allow(body: { target: string; minutes?: number; until?: string; reason?: string }) {
-    return this.send("POST", "/api/allow", body);
+  /** The home service's tool list. Failures degrade to "no home tools" rather than breaking tools/list. */
+  async tools(): Promise<HomeTool[]> {
+    if (cached && cached.base === this.cfg.baseUrl && Date.now() - cached.at < CATALOGUE_TTL_MS) return cached.tools;
+    try {
+      const r = (await this.send("GET", "/services")) as { tools?: HomeTool[] };
+      const tools = (r.tools ?? []).filter((t) => /^[a-z][a-z0-9_]*$/.test(t.name));
+      cached = { at: Date.now(), base: this.cfg.baseUrl, tools };
+      return tools;
+    } catch {
+      return cached?.tools ?? [];
+    }
   }
-  revoke(target: string) { return this.send("POST", "/api/revoke", { target }); }
-  flush(target: string) { return this.send("POST", "/api/flush", { target }); }
 
-  private async send(method: string, path: string, body?: unknown): Promise<any> {
+  async has(name: string): Promise<boolean> {
+    return (await this.tools()).some((t) => t.name === name);
+  }
+
+  call(name: string, args: Record<string, unknown>): Promise<unknown> {
+    return this.send("POST", `/call/${name}`, args);
+  }
+
+  private async send(method: string, path: string, body?: unknown): Promise<unknown> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
     try {
@@ -57,7 +82,7 @@ export class HomeClient {
       const isJson = (res.headers.get("content-type") || "").includes("json");
       if (!res.ok || !isJson) {
         const msg = isJson ? (JSON.parse(text).error ?? text) : `Access refused the request (${res.status})`;
-        throw new HomeError(`Home engine ${method} ${path}: ${msg}`.slice(0, 300), res.status);
+        throw new HomeError(`Home ${method} ${path}: ${msg}`.slice(0, 300), res.status);
       }
       return text ? JSON.parse(text) : null;
     } finally {

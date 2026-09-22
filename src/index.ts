@@ -17,12 +17,16 @@
 
 import OAuthProvider, { type OAuthHelpers, type AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { handleMcp } from "./mcp";
+import { HomeState, HomeStateClient } from "./state";
 import { log, logError } from "./log";
 import type { UnifiConfig } from "./unifi";
+
+export { HomeState };
 
 interface Env {
   OAUTH_KV: KVNamespace;
   OAUTH_PROVIDER: OAuthHelpers; // injected by the provider
+  HOME_STATE: DurableObjectNamespace; // change log + group definitions
 
   // Secrets (wrangler secret put ...)
   UNIFI_API_KEY: string;
@@ -226,7 +230,9 @@ const apiHandler: Handler = {
             actor: props.email,
           }
         : undefined;
-    return handleMcp(request, cfg, home);
+    // One state object for the whole household.
+    const state = new HomeStateClient(env.HOME_STATE.get(env.HOME_STATE.idFromName("household")));
+    return handleMcp(request, cfg, home, state);
   },
 };
 

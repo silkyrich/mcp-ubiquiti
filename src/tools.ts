@@ -9,7 +9,6 @@
  */
 
 import { UnifiClient } from "./unifi";
-import { HomeClient } from "./home";
 
 export interface Tool {
   name: string;
@@ -17,25 +16,8 @@ export interface Tool {
   inputSchema: Record<string, unknown>;
   /** MCP tool annotations, so clients can tell writes apart and ask first. */
   annotations?: Record<string, boolean>;
-  /** `home` is present only when the HOME_* secrets are configured. */
-  handler: (client: UnifiClient, args: Record<string, any>, home?: HomeClient) => Promise<unknown>;
+  handler: (client: UnifiClient, args: Record<string, any>) => Promise<unknown>;
 }
-
-function needHome(home?: HomeClient): HomeClient {
-  if (!home) {
-    throw new Error(
-      "The home policy engine is not configured on this connector (HOME_API_URL / HOME_ACCESS_CLIENT_ID / HOME_ACCESS_CLIENT_SECRET).",
-    );
-  }
-  return home;
-}
-
-/** The engine takes a rule id, or a word from the rule's name ("games", "youtube", "xbox"), or "all". */
-const TARGET = {
-  type: "string",
-  description:
-    'Which rules: "all" (default), or a word from a rule\'s name such as "games", "youtube" or "xbox", or a rule id from archie_status.',
-};
 
 const WRITE = { readOnlyHint: false, destructiveHint: false };
 
@@ -725,74 +707,6 @@ export const TOOLS: Tool[] = [
       await client.deleteTrafficRule(target._id);
       return { deleted: true, rule: describeRule(target, ctx) };
     },
-  },
-
-  // ── Archie's screen-time rules, via the home policy engine ─────────────
-  //
-  // These do NOT edit UniFi directly. The engine at home owns the rules:
-  // it re-enables anything disabled without a recorded override, so a
-  // pause must be recorded there to survive the next minute.
-
-  {
-    name: "archie_status",
-    description:
-      "Archie's screen-time rules right now: each rule, whether it is blocking at this moment, its schedule, and any active pause (an 'override') with when it ends. Also whether the home engine is healthy. Call this before changing anything, and to answer 'is Archie blocked right now?'.",
-    inputSchema: EMPTY_SCHEMA,
-    annotations: { readOnlyHint: true },
-    handler: async (_client, _args, home) => needHome(home).status(),
-  },
-
-  {
-    name: "archie_allow",
-    description:
-      "Let Archie on: pause his rules for a while ('give him an hour', 'until 5pm', 'the rest of the day'). The rules come back on by themselves when the time is up; nobody has to remember. Pass either minutes or an until time (HH:MM, 24-hour, home local time; a time already past means tomorrow). Defaults to all rules; target 'games' or 'youtube' to pause just one. Returns the new status.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        minutes: { type: "number", description: "How long, in minutes. Use this or `until`." },
-        until: { type: "string", description: "When to restore the rules, HH:MM local time, e.g. \"17:00\" or \"23:59\" for the rest of the day." },
-        target: TARGET,
-        reason: { type: "string", description: "Short note for the audit log, e.g. \"homework done\"." },
-      },
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false },
-    handler: async (_client, args, home) => {
-      if (!args.minutes && !args.until) throw new Error("Give either `minutes` or `until`.");
-      return needHome(home).allow({
-        target: args.target || "all",
-        minutes: args.minutes ? Math.max(1, Math.round(args.minutes)) : undefined,
-        until: args.until,
-        reason: args.reason || "via Claude",
-      });
-    },
-  },
-
-  {
-    name: "archie_revoke",
-    description:
-      "End a pause early: put Archie's rules back to their normal schedule now. If a rule is inside its blocking window this cuts whatever he has open. Returns the new status.",
-    inputSchema: { type: "object", properties: { target: TARGET }, additionalProperties: false },
-    annotations: { readOnlyHint: false, destructiveHint: false },
-    handler: async (_client, args, home) => needHome(home).revoke(args.target || "all"),
-  },
-
-  {
-    name: "archie_kick_off",
-    description:
-      "Cut whatever Archie has open right now (a YouTube stream, a game session) without changing any schedule: each blocking rule is switched off and on again, which drops established connections. Only affects rules currently in their blocking window. Returns the new status.",
-    inputSchema: { type: "object", properties: { target: TARGET }, additionalProperties: false },
-    annotations: { readOnlyHint: false, destructiveHint: false },
-    handler: async (_client, args, home) => needHome(home).flush(args.target || "all"),
-  },
-
-  {
-    name: "archie_usage",
-    description:
-      "What Archie's devices did today: for each device, when it first came online, how long it has been online, how much it downloaded, what kind of traffic (games, streaming, web) and a half-hourly timeline. Good for 'what time did he start this morning?' and 'was he on the Xbox?'.",
-    inputSchema: EMPTY_SCHEMA,
-    annotations: { readOnlyHint: true },
-    handler: async (_client, _args, home) => needHome(home).usage(),
   },
 ];
 

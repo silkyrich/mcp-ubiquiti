@@ -10,8 +10,24 @@
 
 import { UnifiClient, UnifiConfig, UnifiError } from "./unifi";
 import { HomeClient, HomeConfig, HomeError } from "./home";
+import { HomeStateClient } from "./state";
 import { TOOLS, TOOLS_BY_NAME } from "./tools";
 import { log, logError } from "./log";
+
+/** Local tools that exist only when the home link is configured. */
+const HOME_LOCAL_TOOLS = [
+  {
+    name: "home_log",
+    description:
+      "The change log of everything done through the home link: who asked, which tool, the arguments and whether it worked, newest first. Answers 'who gave him the afternoon off?' and 'what happened at 15:30?'.",
+    inputSchema: {
+      type: "object",
+      properties: { limit: { type: "number", description: "How many entries (default 50, max 500)." } },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+];
 
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = { name: "mcp-ubiquiti", version: "0.1.0" };
@@ -30,7 +46,12 @@ function error(id: any, code: number, message: string) {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-async function dispatch(req: JsonRpcRequest, cfg: UnifiConfig, home?: HomeConfig): Promise<object | null> {
+async function dispatch(
+  req: JsonRpcRequest,
+  cfg: UnifiConfig,
+  home?: HomeConfig,
+  state?: HomeStateClient,
+): Promise<object | null> {
   switch (req.method) {
     case "initialize":
       return result(req.id, {
@@ -47,38 +68,64 @@ async function dispatch(req: JsonRpcRequest, cfg: UnifiConfig, home?: HomeConfig
     case "ping":
       return result(req.id, {});
 
-    case "tools/list":
-      return result(req.id, {
-        tools: TOOLS.map((t) => ({
-          name: t.name,
-          description: t.description,
-          inputSchema: t.inputSchema,
-          ...(t.annotations ? { annotations: t.annotations } : {}),
-        })),
-      });
+    case "tools/list": {
+      const local = TOOLS.map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema,
+        ...(t.annotations ? { annotations: t.annotations } : {}),
+      }));
+      // Tools advertised by the home service, if one is configured. Names
+      // that collide with a local tool are dropped so the local one wins.
+      const remote = home ? await new HomeClient(home).tools() : [];
+      const extra = home ? HOME_LOCAL_TOOLS : [];
+      const taken = new Set([...local, ...extra].map((t) => t.name));
+      return result(req.id, { tools: [...local, ...extra, ...remote.filter((t) => !taken.has(t.name))] });
+    }
 
     case "tools/call": {
       const name = req.params?.name;
+      const args = req.params?.arguments ?? {};
       const tool = TOOLS_BY_NAME.get(name);
+      const homeClient = home ? new HomeClient(home) : undefined;
+      const started = Date.now();
       if (!tool) {
+        if (home && state && name === "home_log") {
+          const entries = await state.recent(Number(args.limit) || 50);
+          return result(req.id, { content: [{ type: "text", text: JSON.stringify({ entries }, null, 2) }] });
+        }
+        if (homeClient && (await homeClient.has(name))) {
+          const record = (ok: boolean, summary: string) =>
+            state?.log({ ts: new Date().toISOString(), actor: home!.actor, tool: name, args, ok, summary }).catch(() => {});
+          try {
+            const data = await homeClient.call(name, args);
+            log("mcp.tool.ok", { tool: name, ms: Date.now() - started, via: "home" });
+            // Read-only tools are not worth a log row; everything else is.
+            if (!/^home_(groups|status|usage)$/.test(name)) await record(true, "ok");
+            return result(req.id, { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] });
+          } catch (e) {
+            const status = e instanceof HomeError ? e.status : undefined;
+            logError("mcp.tool.failed", { tool: name, ms: Date.now() - started, status, reason: (e as Error).message, via: "home" });
+            await record(false, (e as Error).message.slice(0, 200));
+            return result(req.id, { content: [{ type: "text", text: `Home service error: ${(e as Error).message}` }], isError: true });
+          }
+        }
         logError("mcp.tool.unknown", { tool: name });
         return error(req.id, -32602, `Unknown tool: ${name}`);
       }
       const client = new UnifiClient(cfg);
-      const started = Date.now();
       try {
-        const data = await tool.handler(client, req.params?.arguments ?? {}, home ? new HomeClient(home) : undefined);
+        const data = await tool.handler(client, args);
         log("mcp.tool.ok", { tool: name, ms: Date.now() - started });
         return result(req.id, {
           content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         });
       } catch (e) {
         const isUnifi = e instanceof UnifiError;
-        const isHome = e instanceof HomeError;
         logError("mcp.tool.failed", {
           tool: name,
           ms: Date.now() - started,
-          status: isUnifi || isHome ? (e as UnifiError | HomeError).status : undefined,
+          status: isUnifi ? (e as UnifiError).status : undefined,
           reason: (e as Error).message,
         });
         const msg = isUnifi
@@ -100,7 +147,12 @@ async function dispatch(req: JsonRpcRequest, cfg: UnifiConfig, home?: HomeConfig
  * Handle one Streamable-HTTP POST. Accepts a single JSON-RPC request or a
  * batch array; returns application/json. Notifications yield 202 with no body.
  */
-export async function handleMcp(request: Request, cfg: UnifiConfig, home?: HomeConfig): Promise<Response> {
+export async function handleMcp(
+  request: Request,
+  cfg: UnifiConfig,
+  home?: HomeConfig,
+  state?: HomeStateClient,
+): Promise<Response> {
   if (request.method === "GET") {
     // No server-initiated SSE stream in this stateless design.
     return new Response("Method Not Allowed", { status: 405 });
@@ -118,7 +170,7 @@ export async function handleMcp(request: Request, cfg: UnifiConfig, home?: HomeC
 
   const batch = Array.isArray(payload);
   const reqs: JsonRpcRequest[] = batch ? (payload as JsonRpcRequest[]) : [payload as JsonRpcRequest];
-  const responses = (await Promise.all(reqs.map((r) => dispatch(r, cfg, home)))).filter(
+  const responses = (await Promise.all(reqs.map((r) => dispatch(r, cfg, home, state)))).filter(
     (r): r is object => r !== null,
   );
 
