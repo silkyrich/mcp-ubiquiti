@@ -557,7 +557,7 @@ export const TOOLS: Tool[] = [
   {
     name: "set_traffic_rule",
     description:
-      "Create a traffic rule, or edit one by id. A rule blocks (or allows) the whole internet, DPI app categories (e.g. games) or specific domains, for chosen clients (by MAC) and/or networks (by name), either always or in a weekly window in the console's local time. When editing, only the fields you pass change — e.g. pass just `id` and `enabled: false` to pause a rule for the holidays. Passing client_macs or networks replaces the whole target list. Returns the previous version on edit so the change can be reversed.",
+      "Create a traffic rule, or edit one by id. A rule blocks (or allows) the whole internet, DPI app categories (e.g. games) or specific domains, for chosen clients (by MAC) and/or networks (by name), either always or in a weekly window in the console's local time. When editing, only the fields you pass change. Passing client_macs or networks replaces the whole target list. Returns the previous version on edit so the change can be reversed. IMPORTANT: rules managed by the home policy engine (if home_* tools are present, anything home_status lists) must NOT be paused here — use home_allow, which records the pause and restores the rule on time. Disabling such a rule here is adopted by the engine as a pause until midnight.",
     inputSchema: {
       type: "object",
       properties: {
